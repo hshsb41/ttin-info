@@ -4,10 +4,10 @@ import requests
 import pycountry
 from datetime import datetime
 import json
+import re
 
 app = FastAPI(title="TikTok Info API")
 
-# Enable CORS for All Games, Websites, and Bots
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -48,7 +48,7 @@ def get_tiktok_info(username: str):
     username = username.replace("@", "").strip()
     
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9",
         "Referer": "https://www.tiktok.com/",
@@ -63,26 +63,63 @@ def get_tiktok_info(username: str):
 
         html = res.text
         
-        json_str = None
-        if '__UNIVERSAL_DATA_FOR_REHYDRATION__' in html:
-            json_str = html.split('__UNIVERSAL_DATA_FOR_REHYDRATION__">')[1].split('</script>')[0]
-        elif 'SIGI_STATE' in html:
-            json_str = html.split('window[\'SIGI_STATE\']=')[1].split(';window[')[0]
-
-        if not json_str:
-            raise HTTPException(status_code=404, detail="Unable to parse user data from TikTok.")
-
-        data_json = json.loads(json_str)
-
-        user_detail = None
-        if "__DEFAULT_SCOPE__" in data_json:
-            user_detail = data_json["__DEFAULT_SCOPE__"].get("webapp.user-detail", {})
+        # Robust Regex Search for JSON data inside HTML script tags
+        json_data = None
         
-        user_info = user_detail.get("userInfo", {}).get("user", {})
-        stats_info = user_detail.get("userInfo", {}).get("stats", {})
+        # Try finding SIGI_STATE or __UNIVERSAL_DATA_FOR_REHYDRATION__ safely using regex
+        patterns = [
+            r'<script id="SIGI_STATE" type="application/json">(.*?)</script>',
+            r'<script id="__UNIVERSAL_DATA_FOR_REHYDRATION__" type="application/json">(.*?)</script>',
+            r'window\[\'SIGI_STATE\'\]\s*=\s*({.*?});'
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, html, re.DOTALL)
+            if match:
+                try:
+                    json_data = json.loads(match.group(1))
+                    break
+                except:
+                    continue
+        
+        # Fallback to general substring parsing if regex fails
+        if not json_data:
+            if '__UNIVERSAL_DATA_FOR_REHYDRATION__' in html:
+                try:
+                    parts = html.split('__UNIVERSAL_DATA_FOR_REHYDRATION__">')
+                    if len(parts) > 1:
+                        subparts = parts[1].split('</script>')
+                        json_data = json.loads(subparts[0])
+                except:
+                    pass
+
+        if not json_data:
+            raise HTTPException(status_code=404, detail="TikTok layout changed or user doesn't exist.")
+
+        # Navigate nested dictionaries safely
+        user_info = {}
+        stats_info = {}
+        
+        try:
+            if "__DEFAULT_SCOPE__" in json_data:
+                user_detail = json_data["__DEFAULT_SCOPE__"].get("webapp.user-detail", {})
+                userInfo = user_detail.get("userInfo", {})
+                user_info = userInfo.get("user", {})
+                stats_info = userInfo.get("stats", {})
+            elif "UserModule" in json_data:
+                users = json_data.get("UserModule", {}).get("users", {})
+                if users:
+                    uid = list(users.keys())[0]
+                    user_info = users[uid]
+                stats = json_data.get("UserModule", {}).get("stats", {})
+                if stats:
+                    uid = list(stats.keys())[0]
+                    stats_info = stats[uid]
+        except:
+            pass
 
         if not user_info:
-            raise HTTPException(status_code=404, detail="TikTok username not found.")
+            raise HTTPException(status_code=404, detail="Could not extract user details from JSON.")
 
         user_id = str(user_info.get("id", ""))
         country_code = user_info.get("region", "")
